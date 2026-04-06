@@ -2267,6 +2267,7 @@ function makeSnake(x, y, colorIdx, context = [], task = null, config = {}) {
 export default function SnakeAgent() {
   const canvasRef = useRef(null);
   const inputRef = useRef(null);
+  const touchStateRef = useRef(null);
   const tick = useRef(0);
   const savedCfg = useRef(Storage.loadApiConfig());
 
@@ -2312,6 +2313,17 @@ export default function SnakeAgent() {
   const [logOpen, setLogOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   const [uiVersion, rerender] = useState(0);
+  const [viewport, setViewport] = useState(() => ({
+    width: typeof window !== "undefined" ? window.innerWidth : 1280,
+    height: typeof window !== "undefined" ? window.innerHeight : 800,
+  }));
+  const [isTouchUI, setIsTouchUI] = useState(() => (
+    typeof window !== "undefined" && (!!window.matchMedia?.("(pointer: coarse)")?.matches || "ontouchstart" in window)
+  ));
+
+  const isCompactUI = viewport.width < 980;
+  const isPhoneUI = viewport.width < 680;
+  const showHoverPreview = !isTouchUI;
 
   const hasSessionContent = useCallback((state = S.current) => (
     (state.bubbles || []).some(b => !b.isOnboarding) || state.snakes?.some(sn => sn.context.length > 0)
@@ -2486,10 +2498,37 @@ export default function SnakeAgent() {
     persistSnakeConfig(sn);
   }
 
+  function routeSelectedSnakeTo(point) {
+    const s = S.current;
+    const snake = getSelectedSnake(s);
+    if (!snake || !point) return false;
+    snake.autoSeek = true;
+    snake.waypoint = { x: point.x, y: point.y };
+    snake.leash = { x: point.x, y: point.y, radius: LEASH_RADIUS };
+    snake.targetBubble = null;
+    spawnP(point.x, point.y, `${PALETTES[snake.colorIdx % PALETTES.length].head}44`, 6);
+    rerender(n => n + 1);
+    return true;
+  }
+
+  function parkSelectedSnake() {
+    const s = S.current;
+    const sel = s.snakes.find(sn => sn.id === s.selectedSnake);
+    if (!sel) return false;
+    sel.leash = null;
+    sel.waypoint = null;
+    sel.targetBubble = null;
+    sel.autoSeek = false;
+    rerender(n => n + 1);
+    return true;
+  }
+
   /* ── resize ── */
   useEffect(() => {
     const fn = () => {
       const c = canvasRef.current; if (!c) return;
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+      setIsTouchUI(!!window.matchMedia?.("(pointer: coarse)")?.matches || "ontouchstart" in window);
       const d = window.devicePixelRatio || 1;
       const w = c.parentElement.clientWidth, h = c.parentElement.clientHeight;
       c.width = w * d; c.height = h * d;
@@ -2589,7 +2628,7 @@ export default function SnakeAgent() {
     return () => { c.removeEventListener("dragover", prevent); c.removeEventListener("drop", onDrop); };
   }, []);
 
-  /* ── mouse ── */
+  /* ── pointer / touch ── */
   useEffect(() => {
     const c = canvasRef.current; if (!c) return;
     const toWorld = (e) => {
@@ -2605,13 +2644,24 @@ export default function SnakeAgent() {
       return true;
     };
 
+    const openBubbleCard = (bubble, s) => {
+      if (!bubble) return false;
+      bubble.humanRead = true;
+      if (toggleResultPanel(bubble, s)) return true;
+      s.expandedBubbleId = s.expandedBubbleId === bubble.id ? null : bubble.id;
+      s.expandedSnakeId = null;
+      s.expandedScroll = 0;
+      rerender(n => n + 1);
+      return true;
+    };
+
     const onDown = (e) => {
       if (e.button !== 0) return;
       const w = toWorld(e); const s = S.current;
       const hitBubble = pickBubbleAtPoint(s, w, { preferResults: true, preferActiveResult: true });
       s.previewBubbleId = null;
       setCtxMenu(null);
-      setConfigOpen(null);
+      if (!isTouchUI) setConfigOpen(null);
 
       // any click cancels pending merges
       let hadMerge = false;
@@ -2778,14 +2828,19 @@ export default function SnakeAgent() {
       if (hitBubble) s.hoverBubble = hitBubble.id;
       for (const sn of s.snakes) if (sn.alive && dist(w, sn.segments[0]) < 26) { s.hoverSnake = sn.id; break; }
       let shouldRefresh = false;
-      if (s.hoverBubble !== prevHover) { s.hoverStartTime = Date.now(); s.previewBubbleId = null; shouldRefresh = true; }
-      else if (s.hoverBubble && !s.previewBubbleId && Date.now() - s.hoverStartTime > 800) {
-        s.previewBubbleId = s.hoverBubble;
-        const hb = s.bubbles.find(b => b.id === s.hoverBubble);
-        if (hb) hb.humanRead = true;
+      if (showHoverPreview) {
+        if (s.hoverBubble !== prevHover) { s.hoverStartTime = Date.now(); s.previewBubbleId = null; shouldRefresh = true; }
+        else if (s.hoverBubble && !s.previewBubbleId && Date.now() - s.hoverStartTime > 800) {
+          s.previewBubbleId = s.hoverBubble;
+          const hb = s.bubbles.find(b => b.id === s.hoverBubble);
+          if (hb) hb.humanRead = true;
+          shouldRefresh = true;
+        }
+        if (!s.hoverBubble && s.previewBubbleId) { s.previewBubbleId = null; shouldRefresh = true; }
+      } else if (s.previewBubbleId) {
+        s.previewBubbleId = null;
         shouldRefresh = true;
       }
-      if (!s.hoverBubble && s.previewBubbleId) { s.previewBubbleId = null; shouldRefresh = true; }
       if (prevPreview !== s.previewBubbleId) shouldRefresh = true;
       if (shouldRefresh) rerender(n => n + 1);
     };
@@ -2887,20 +2942,147 @@ export default function SnakeAgent() {
       }
       // close any expanded card
       if (s.expandedBubbleId || s.expandedSnakeId) { s.expandedBubbleId = null; s.expandedSnakeId = null; rerender(n => n + 1); return; }
-      const sel = s.snakes.find(sn => sn.id === s.selectedSnake);
-      if (sel) {
-        sel.leash = null;
-        sel.waypoint = null;
-        sel.targetBubble = null;
-        sel.autoSeek = false;
-        rerender(n => n + 1);
+      parkSelectedSnake();
+    };
+
+    const cancelTouchLongPress = () => {
+      const state = touchStateRef.current;
+      if (state?.longPressTimer) clearTimeout(state.longPressTimer);
+      if (state) state.longPressTimer = null;
+    };
+
+    const onTouchStart = (e) => {
+      e.preventDefault();
+      if (e.touches.length !== 1) { cancelTouchLongPress(); return; }
+      const touch = e.touches[0];
+      const w = toWorld(touch);
+      const s = S.current;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const hitBubble = pickBubbleAtPoint(s, w, { preferResults: true, preferActiveResult: true });
+      const hitSnake = !hitBubble ? s.snakes.find(sn => sn.alive && dist(w, sn.segments[0]) < 26) || null : null;
+
+      setCtxMenu(null);
+      s.previewBubbleId = null;
+      s.hoverBubble = null;
+      s.hoverSnake = null;
+
+      touchStateRef.current = {
+        startClientX: touch.clientX,
+        startClientY: touch.clientY,
+        startWorld: w,
+        moved: false,
+        hitBubbleId: hitBubble?.id || null,
+        hitSnakeId: hitSnake?.id || null,
+        menuOpened: false,
+        longPressTimer: null,
+      };
+
+      if (hitBubble) {
+        s.dragBubble = hitBubble.id;
+        s.dragOffset = { x: hitBubble.x - w.x, y: hitBubble.y - w.y };
+        s._dragStartPos = { x: hitBubble.x, y: hitBubble.y };
+        s._dragMoved = false;
+        s.dragToTrash = false;
+        setDragging(true);
+      } else if (!hitSnake) {
+        s.isPanning = true;
+        s.panStart = { x: touch.clientX, y: touch.clientY };
+        s.camStart = { ...s.camera };
+        s.cameraMode = "free";
       }
+
+      touchStateRef.current.longPressTimer = setTimeout(() => {
+        const state = touchStateRef.current;
+        if (!state || state.moved) return;
+        if (state.hitSnakeId) {
+          state.menuOpened = true;
+          setConfigOpen(state.hitSnakeId);
+        } else if (state.hitBubbleId) {
+          state.menuOpened = true;
+          setCtxMenu({
+            x: clamp(touch.clientX - rect.left, 14, rect.width - 180),
+            y: clamp(touch.clientY - rect.top, 14, rect.height - 160),
+            bubbleId: state.hitBubbleId,
+          });
+        } else if (s.selectedSnake) {
+          state.menuOpened = true;
+          routeSelectedSnakeTo(w);
+        }
+        state.longPressTimer = null;
+      }, 420);
+    };
+
+    const onTouchMove = (e) => {
+      e.preventDefault();
+      if (e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const state = touchStateRef.current;
+      if (!state) return;
+      const w = toWorld(touch);
+      const moveDist = Math.hypot(touch.clientX - state.startClientX, touch.clientY - state.startClientY);
+      if (moveDist > 8 && !state.moved) {
+        state.moved = true;
+        cancelTouchLongPress();
+      }
+      onMove(touch);
+    };
+
+    const onTouchEnd = (e) => {
+      e.preventDefault();
+      const s = S.current;
+      const state = touchStateRef.current;
+      cancelTouchLongPress();
+      if (!state) {
+        onUp();
+        touchStateRef.current = null;
+        return;
+      }
+
+      const touchPoint = e.changedTouches?.[0];
+      const world = touchPoint ? toWorld(touchPoint) : state.startWorld;
+      const endedBubble = state.hitBubbleId ? s.bubbles.find(b => b.id === state.hitBubbleId) : null;
+      const endedSnake = state.hitSnakeId ? s.snakes.find(sn => sn.id === state.hitSnakeId && sn.alive) : null;
+
+      onUp();
+
+      if (!state.moved) {
+        if (state.menuOpened) {
+          touchStateRef.current = null;
+          return;
+        }
+        if (endedBubble) {
+          openBubbleCard(endedBubble, s);
+        } else if (endedSnake) {
+          s.selectedSnake = endedSnake.id;
+          s.cameraMode = "follow";
+          rerender(n => n + 1);
+        } else if (s.selectedSnake) {
+          if (!(s.expandedBubbleId || s.expandedSnakeId || s.activeResultId)) routeSelectedSnakeTo(world);
+          else {
+            s.expandedBubbleId = null;
+            s.expandedSnakeId = null;
+            s.activeResultId = null;
+            rerender(n => n + 1);
+          }
+        } else if (s.expandedBubbleId || s.expandedSnakeId || s.activeResultId) {
+          s.expandedBubbleId = null;
+          s.expandedSnakeId = null;
+          s.activeResultId = null;
+          rerender(n => n + 1);
+        }
+      }
+
+      touchStateRef.current = null;
     };
 
     c.addEventListener("mousedown", onDown); c.addEventListener("mousemove", onMove);
     c.addEventListener("mouseup", onUp); c.addEventListener("mouseleave", onUp);
     c.addEventListener("wheel", onWheel, { passive: false }); c.addEventListener("dblclick", onDbl);
     c.addEventListener("contextmenu", onContext);
+    c.addEventListener("touchstart", onTouchStart, { passive: false });
+    c.addEventListener("touchmove", onTouchMove, { passive: false });
+    c.addEventListener("touchend", onTouchEnd, { passive: false });
+    c.addEventListener("touchcancel", onTouchEnd, { passive: false });
 
     const onKey = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
@@ -2935,12 +3117,17 @@ export default function SnakeAgent() {
     window.addEventListener("keydown", onKey);
 
     return () => {
+      cancelTouchLongPress();
       c.removeEventListener("mousedown", onDown); c.removeEventListener("mousemove", onMove);
       c.removeEventListener("mouseup", onUp); c.removeEventListener("mouseleave", onUp);
       c.removeEventListener("wheel", onWheel); c.removeEventListener("dblclick", onDbl);
+      c.removeEventListener("touchstart", onTouchStart);
+      c.removeEventListener("touchmove", onTouchMove);
+      c.removeEventListener("touchend", onTouchEnd);
+      c.removeEventListener("touchcancel", onTouchEnd);
       c.removeEventListener("contextmenu", onContext); window.removeEventListener("keydown", onKey);
     };
-  }, []);
+  }, [debugOpen, isTouchUI, showHoverPreview]);
 
   function spawnP(x, y, color, count = 10) {
     for (let i = 0; i < count; i++) {
@@ -4343,50 +4530,61 @@ export default function SnakeAgent() {
   const currentSessionLabel = isPlaceholderSessionName(mapName) && !hasSessionContent()
     ? "New session"
     : mapName;
+  const interactionHint = isTouchUI
+    ? "Tap bubble to open · Long-press for menu/config · Tap map to send selected snake"
+    : "Double-click source to open · Click report to read · Click bubble mid-research to pin · Type to steer";
 
   return (
     <div style={{ width: "100vw", height: "100vh", background: "#050510", display: "flex", flexDirection: "column", fontFamily: "-apple-system, 'Segoe UI', sans-serif", overflow: "hidden" }}>
       {/* header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 14px", background: "#080812", borderBottom: "1px solid #10102a", zIndex: 10, flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ color: "#22d65b", fontSize: 14, fontWeight: 700, letterSpacing: 1.5, fontFamily: "'SF Mono','Fira Code',monospace" }}>🐍 CONTEXT·SNAKE</span>
-          <span style={{ color: "#222240", fontSize: 9.5 }}>
-            Double-click 🔗 to open · Click ★ to read · Click bubble mid-research to pin · Type to steer
-          </span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: isCompactUI ? "wrap" : "nowrap", gap: isCompactUI ? 8 : 0, padding: isCompactUI ? "8px 10px" : "5px 14px", background: "#080812", borderBottom: "1px solid #10102a", zIndex: 10, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, width: isCompactUI ? "100%" : "auto" }}>
+          <span style={{ color: "#22d65b", fontSize: isCompactUI ? 12 : 14, fontWeight: 700, letterSpacing: 1.5, fontFamily: "'SF Mono','Fira Code',monospace", whiteSpace: "nowrap" }}>🐍 CONTEXT·SNAKE</span>
+          {!isPhoneUI && (
+            <span style={{ color: "#2a2a4f", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {interactionHint}
+            </span>
+          )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: isCompactUI ? "wrap" : "nowrap", width: isCompactUI ? "100%" : "auto" }}>
           <button onClick={() => { S.current.cameraMode = S.current.cameraMode === "follow" ? "free" : "follow"; rerender(n => n + 1); }} style={{
             background: S.current.cameraMode === "follow" ? "#22d65b18" : "transparent",
             color: S.current.cameraMode === "follow" ? "#22d65b" : "#666",
             border: `1px solid ${S.current.cameraMode === "follow" ? "#22d65b44" : "#22224433"}`,
-            borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit",
+            borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit",
           }}>{S.current.cameraMode === "follow" ? "📷 Following" : "🖱 Free cam"}</button>
-          <button onClick={forkActive} style={{ background: "transparent", color: "#22d65b", border: "1px solid #22d65b33", borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>+ Fork</button>
+          <button onClick={forkActive} style={{ background: "transparent", color: "#22d65b", border: "1px solid #22d65b33", borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>+ Fork</button>
           <button
             onClick={() => spawnFreshAgent()}
-            style={{ background: "transparent", color: "#80ffdb", border: "1px solid #80ffdb33", borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}
+            style={{ background: "transparent", color: "#80ffdb", border: "1px solid #80ffdb33", borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}
           >+ Fresh</button>
+          {activeSnake && (
+            <button
+              onClick={() => setConfigOpen(activeSnake.id)}
+              style={{ background: "transparent", color: "#9fd0ff", border: "1px solid #9fd0ff33", borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}
+            >⚙ Agent</button>
+          )}
           <button
             onClick={() => clearSnakeContext()}
             disabled={!canClearActiveSnake}
             title={activeSnakeBusyReason ? `Finish ${activeSnakeBusyReason} before clearing context` : activeSnake?.context.length ? "Clear this agent's internal memory" : "Agent is already clean"}
-            style={{ background: "transparent", color: canClearActiveSnake ? "#ffb86b" : "#445", border: `1px solid ${canClearActiveSnake ? "#ffb86b33" : "#22224433"}`, borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: canClearActiveSnake ? "pointer" : "not-allowed", fontFamily: "inherit", opacity: canClearActiveSnake ? 1 : 0.55 }}
+            style={{ background: "transparent", color: canClearActiveSnake ? "#ffb86b" : "#445", border: `1px solid ${canClearActiveSnake ? "#ffb86b33" : "#22224433"}`, borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: canClearActiveSnake ? "pointer" : "not-allowed", fontFamily: "inherit", opacity: canClearActiveSnake ? 1 : 0.55 }}
           >Clear ctx</button>
-          <button onClick={mergeActive} style={{ background: "transparent", color: "#e6a020", border: "1px solid #e6a02033", borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>⊕ Merge</button>
+          <button onClick={mergeActive} style={{ background: "transparent", color: "#e6a020", border: "1px solid #e6a02033", borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>⊕ Merge</button>
           {S.current.selectedBubbles.size > 0 && (
-            <button onClick={deleteSelected} style={{ background: "transparent", color: "#ff6666", border: "1px solid #ff666633", borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>Delete ({S.current.selectedBubbles.size})</button>
+            <button onClick={deleteSelected} style={{ background: "transparent", color: "#ff6666", border: "1px solid #ff666633", borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>Delete ({S.current.selectedBubbles.size})</button>
           )}
-          <div style={{ width: 1, height: 16, background: "#1a1a30", margin: "0 2px" }} />
+          {!isPhoneUI && <div style={{ width: 1, height: 16, background: "#1a1a30", margin: "0 2px" }} />}
           <button onClick={() => setTrashOpen(p => !p)} style={{
             background: trashOpen ? "#1a1030" : "transparent", color: trashOpen ? "#cc88ff" : "#555",
             border: `1px solid ${trashOpen ? "#44226666" : "#22224433"}`,
-            borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit",
+            borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit",
           }}>🗑{S.current.trash.length > 0 ? ` ${S.current.trash.length}` : ""}</button>
-          <div style={{ width: 1, height: 16, background: "#1a1a30", margin: "0 2px" }} />
-          <div style={{ color: lastPersistedAt ? "#6b82a6" : "#445", fontSize: 10, padding: "0 4px", whiteSpace: "nowrap" }}>{autosaveLabel}</div>
-          <button onClick={() => setMapMenuOpen(p => !p)} style={{ background: mapMenuOpen ? "#101028" : "transparent", color: mapMenuOpen ? "#66aaff" : "#555", border: `1px solid ${mapMenuOpen ? "#336699" : "#22224433"}`, borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>☰ {currentSessionLabel}</button>
-          <button onClick={() => setLogOpen(p => !p)} style={{ background: logOpen ? "#101820" : "transparent", color: logOpen ? "#5ce0d8" : "#555", border: `1px solid ${logOpen ? "#186660" : "#22224433"}`, borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>📋 Log</button>
-          <button onClick={() => setDebugOpen(p => !p)} style={{ background: debugOpen ? "#1a1014" : "transparent", color: debugOpen ? "#ff8844" : "#555", border: `1px solid ${debugOpen ? "#663322" : "#22224433"}`, borderRadius: 5, padding: "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>🐛 Debug</button>
+          {!isPhoneUI && <div style={{ width: 1, height: 16, background: "#1a1a30", margin: "0 2px" }} />}
+          {!isPhoneUI && <div style={{ color: lastPersistedAt ? "#6b82a6" : "#445", fontSize: 10, padding: "0 4px", whiteSpace: "nowrap" }}>{autosaveLabel}</div>}
+          <button onClick={() => setMapMenuOpen(p => !p)} style={{ background: mapMenuOpen ? "#101028" : "transparent", color: mapMenuOpen ? "#66aaff" : "#555", border: `1px solid ${mapMenuOpen ? "#336699" : "#22224433"}`, borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", maxWidth: isPhoneUI ? 128 : 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>☰ {currentSessionLabel}</button>
+          {!isPhoneUI && <button onClick={() => setLogOpen(p => !p)} style={{ background: logOpen ? "#101820" : "transparent", color: logOpen ? "#5ce0d8" : "#555", border: `1px solid ${logOpen ? "#186660" : "#22224433"}`, borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>📋 Log</button>}
+          {!isPhoneUI && <button onClick={() => setDebugOpen(p => !p)} style={{ background: debugOpen ? "#1a1014" : "transparent", color: debugOpen ? "#ff8844" : "#555", border: `1px solid ${debugOpen ? "#663322" : "#22224433"}`, borderRadius: 5, padding: isCompactUI ? "5px 9px" : "3px 9px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>🐛 Debug</button>}
           {loading && <span style={{ color: "#22d65b", fontSize: 10 }}><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>◌</span> working…</span>}
         </div>
       </div>
@@ -4414,11 +4612,11 @@ export default function SnakeAgent() {
                     rerender(n => n + 1);
                   }}
                   style={{
-                    position: "absolute", top: 10 + i * 38, right: 10, zIndex: 12,
+                    position: "absolute", top: 10 + i * (isPhoneUI ? 44 : 38), right: 10, zIndex: 12,
                     background: "#0c0c1aee", border: `1px solid ${col.body}44`,
                     borderRadius: 8, padding: "7px 14px", cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 8,
-                    opacity, transition: "opacity 0.3s", maxWidth: 300,
+                    opacity, transition: "opacity 0.3s", maxWidth: isPhoneUI ? viewport.width - 20 : 300,
                     boxShadow: `0 4px 20px rgba(0,0,0,0.5), inset 0 0 0 1px ${col.body}11`,
                   }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: col.head, flexShrink: 0 }} />
@@ -4428,7 +4626,7 @@ export default function SnakeAgent() {
             });
           })()}
 
-          {S.current.previewBubbleId && (() => {
+          {showHoverPreview && S.current.previewBubbleId && (() => {
             const s = S.current;
             const b = s.bubbles.find(bubble => bubble.id === s.previewBubbleId);
             if (!b) return null;
@@ -4804,7 +5002,9 @@ export default function SnakeAgent() {
               b.isMemory ? "Compressed memory" : null,
               sourceDisplay?.siteName || null,
             ].filter(Boolean);
-            const useSplitLayout = cW > 1080;
+            const useSplitLayout = !isCompactUI && cW > 1080;
+            const bubbleOverlayWidth = Math.min(b.isResult ? 1040 : 940, cW - (isCompactUI ? 16 : 40));
+            const bubbleOverlayHeight = cH - (isCompactUI ? 16 : 60);
 
             return (
               <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 17 }}>
@@ -4816,8 +5016,12 @@ export default function SnakeAgent() {
                   onWheel={e => e.stopPropagation()}
                   style={{
                     position: "absolute",
-                    left: "50%", top: "50%", transform: "translate(-50%, -50%)",
-                    width: Math.min(b.isResult ? 1040 : 940, cW - 40), maxHeight: cH - 60,
+                    left: isCompactUI ? 8 : "50%",
+                    right: isCompactUI ? 8 : "auto",
+                    top: isCompactUI ? 8 : "50%",
+                    transform: isCompactUI ? "none" : "translate(-50%, -50%)",
+                    width: bubbleOverlayWidth,
+                    maxHeight: bubbleOverlayHeight,
                     background: "linear-gradient(180deg, #0a0d16 0%, #070912 100%)",
                     border: `1.5px solid ${accentColor}33`,
                     borderRadius: 20, overflow: "hidden", zIndex: 18,
@@ -4842,7 +5046,7 @@ export default function SnakeAgent() {
                           ))}
                         </div>
                       </div>
-                      <div style={{ fontSize: 11, color: "#63708f", whiteSpace: "nowrap", paddingTop: 3 }}>Click outside to close</div>
+                      <div style={{ fontSize: 11, color: "#63708f", whiteSpace: "nowrap", paddingTop: 3 }}>{isTouchUI ? "Tap outside to close" : "Click outside to close"}</div>
                     </div>
                   </div>
                   <div style={{ flex: 1, overflowY: "auto", padding: "22px 24px 26px" }}>
@@ -4964,10 +5168,10 @@ export default function SnakeAgent() {
               x: sn.segments[0].x - s.camera.x + W / 2,
               y: sn.segments[0].y - s.camera.y + H / 2,
             };
-            const popW = 260;
-            const popH = 430;
-            let px = clamp(headScreen.x + 30, 8, W - popW - 8);
-            let py = clamp(headScreen.y - popH / 2, 8, H - popH - 8);
+            const popW = isCompactUI ? Math.min(340, W - 20) : 260;
+            const popH = isCompactUI ? Math.min(500, H - 20) : 430;
+            let px = isCompactUI ? (W - popW) / 2 : clamp(headScreen.x + 30, 8, W - popW - 8);
+            let py = isCompactUI ? Math.max(8, (H - popH) / 2) : clamp(headScreen.y - popH / 2, 8, H - popH - 8);
 
             const inputStyle = {
               width: "100%", background: "#0e0e1e", border: "1px solid #1e1e40",
@@ -5088,7 +5292,7 @@ export default function SnakeAgent() {
             const entries = _activityLog.slice(-80).reverse();
             const AC = { request: "#66aaff", response: "#22d65b", "rate-limited": "#e6a020", "research:start": "#5ce0d8", "research:plan": "#5ce0d8", "research:search": "#55aadd", "research:found": "#22d65b", "research:merged": "#80ffdb", "research:reflect": "#e0aaff", "research:sufficient": "#66ff88", "research:synthesize": "#66ff88", "research:done": "#22d65b", "research:error": "#ff6666", "error": "#ff6666", exception: "#ff6666", "timeout 30s": "#ff6666" };
             return (
-              <div onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()} style={{ position: "absolute", bottom: 50, left: 10, width: 400, height: 260, zIndex: 16, background: "#080810", border: "1px solid #1a1a3a", borderRadius: 10, boxShadow: "0 8px 30px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()} style={{ position: "absolute", bottom: isPhoneUI ? 72 : 50, left: 10, width: isPhoneUI ? "calc(100% - 20px)" : 400, height: isPhoneUI ? Math.min(320, viewport.height * 0.42) : 260, zIndex: 16, background: "#080810", border: "1px solid #1a1a3a", borderRadius: 10, boxShadow: "0 8px 30px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
                 <div style={{ padding: "6px 10px", borderBottom: "1px solid #14142a", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                   <span style={{ color: "#5ce0d8", fontSize: 11, fontWeight: 600 }}>📋 Activity Log</span>
                   <div style={{ display: "flex", gap: 6 }}>
@@ -5110,7 +5314,7 @@ export default function SnakeAgent() {
 
           {/* Map management popup */}
           {mapMenuOpen && (
-            <div onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 8, right: 8, width: 260, maxHeight: "60vh", zIndex: 16, background: "#0a0a16", border: "1px solid #1a1a3a", borderRadius: 10, boxShadow: "0 12px 40px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 8, right: 8, width: isPhoneUI ? "calc(100% - 16px)" : 260, maxHeight: isPhoneUI ? "72vh" : "60vh", zIndex: 16, background: "#0a0a16", border: "1px solid #1a1a3a", borderRadius: 10, boxShadow: "0 12px 40px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
               <div style={{ padding: "10px 12px", borderBottom: "1px solid #14142a", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span style={{ color: "#66aaff", fontSize: 12, fontWeight: 600 }}>Sessions</span>
                 <div style={{ display: "flex", gap: 6 }}>
@@ -5155,7 +5359,7 @@ export default function SnakeAgent() {
           {/* Trash floating popup */}
           {trashOpen && (
             <div style={{
-              position: "absolute", top: 8, right: 8, width: 280, maxHeight: "60vh", zIndex: 15,
+              position: "absolute", top: 8, right: 8, width: isPhoneUI ? "calc(100% - 16px)" : 280, maxHeight: isPhoneUI ? "72vh" : "60vh", zIndex: 15,
               background: "#0a0a16", border: "1px solid #1a1a3a", borderRadius: 10,
               boxShadow: "0 12px 40px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", overflow: "hidden",
             }}>
@@ -5192,7 +5396,9 @@ export default function SnakeAgent() {
 
           {/* drop zone hint */}
           <div style={{ position: "absolute", bottom: 12, left: "50%", transform: "translateX(-50%)", color: "#1a1a40", fontSize: 11, pointerEvents: "none" }}>
-            drop files or documents to add to the knowledge map
+            {isTouchUI
+              ? "Tap to read · long-press for actions · tap map to send the selected snake"
+              : "drop files or documents to add to the knowledge map"}
           </div>
         </div>
 
@@ -5201,13 +5407,33 @@ export default function SnakeAgent() {
           const s = S.current;
           const r = s.results.find(r => r.id === s.activeResultId);
           if (!r) return null;
+          const panelStyle = isCompactUI
+            ? {
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: isPhoneUI ? "74vh" : "68vh",
+                zIndex: 19,
+                borderLeft: "none",
+                borderTop: "1px solid #101b26",
+                borderTopLeftRadius: 20,
+                borderTopRightRadius: 20,
+                boxShadow: "0 -16px 50px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.02)",
+              }
+            : {
+                width: "clamp(460px, 38vw, 620px)",
+                flexShrink: 0,
+                borderLeft: "1px solid #101b26",
+                boxShadow: "inset 1px 0 0 rgba(255,255,255,0.02)",
+              };
           return (
-            <div style={{ width: "clamp(460px, 38vw, 620px)", flexShrink: 0, background: "linear-gradient(180deg, #060812 0%, #05060d 100%)", borderLeft: "1px solid #101b26", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "inset 1px 0 0 rgba(255,255,255,0.02)" }}>
+            <div style={{ ...panelStyle, background: "linear-gradient(180deg, #060812 0%, #05060d 100%)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
               <div style={{ padding: "20px 22px 14px", borderBottom: "1px solid #18311e", background: "linear-gradient(180deg, rgba(102,255,136,0.08) 0%, rgba(102,255,136,0.02) 100%)", display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexShrink: 0 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
                     <span style={{ fontSize: 22, color: "#66ff88", lineHeight: 1 }}>★</span>
-                    <span style={{ fontSize: 24, fontWeight: 800, color: "#66ff88", lineHeight: 1.12, letterSpacing: "-0.02em" }}>{r.title}</span>
+                    <span style={{ fontSize: isPhoneUI ? 20 : 24, fontWeight: 800, color: "#66ff88", lineHeight: 1.12, letterSpacing: "-0.02em" }}>{r.title}</span>
                   </div>
                   <div style={{ fontSize: 11, color: "#6b7897" }}>by {r.snakeName} · {new Date(r.createdAt).toLocaleTimeString()}{s.results.length > 1 ? ` · ${s.results.length} results` : ""}</div>
                 </div>
@@ -5220,11 +5446,11 @@ export default function SnakeAgent() {
                   ))}
                 </div>
               )}
-              <div style={{ flex: 1, overflowY: "auto", padding: "22px 22px 28px" }}>
+              <div style={{ flex: 1, overflowY: "auto", padding: isPhoneUI ? "16px 14px 22px" : "22px 22px 28px" }}>
                 <article style={{
                   maxWidth: 720,
                   margin: "0 auto",
-                  padding: "24px 26px 26px",
+                  padding: isPhoneUI ? "18px 16px 20px" : "24px 26px 26px",
                   borderRadius: 20,
                   background: "rgba(10,13,23,0.92)",
                   border: "1px solid #141c30",
@@ -5267,7 +5493,7 @@ export default function SnakeAgent() {
           : `Ask ${selectedSnake.name} to research anything…`;
         const sendDisabled = !hasTarget || (targetHasKey && !input.trim());
         return (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 14px", background: "#080812", borderTop: `1px solid ${isResearching ? "#5ce0d822" : "#10102a"}`, zIndex: 10, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: isPhoneUI ? "8px 10px" : "7px 14px", background: "#080812", borderTop: `1px solid ${isResearching ? "#5ce0d822" : "#10102a"}`, zIndex: 10, flexShrink: 0, flexWrap: isPhoneUI ? "wrap" : "nowrap" }}>
             <div
               style={{
                 display: "flex",
@@ -5290,15 +5516,18 @@ export default function SnakeAgent() {
               {hasTarget && !targetHasKey && <span style={{ fontSize: 9, color: "#ddcc55", opacity: 0.85 }}>key needed</span>}
               {isResearching && <span style={{ fontSize: 9, color: "#5ce0d8", opacity: 0.8 }}>steering</span>}
             </div>
-            <div style={{ flex: 1, display: "flex", background: steerBg, borderRadius: 7, border: `1px solid ${steerBorder}`, padding: "0 10px" }}>
+            {hasTarget && (
+              <button onClick={() => setConfigOpen(selectedSnake.id)} style={{ background: "transparent", color: "#9fd0ff", border: "1px solid #9fd0ff33", borderRadius: 7, padding: "9px 12px", fontSize: 11, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>⚙</button>
+            )}
+            <div style={{ flex: 1, minWidth: isPhoneUI ? "100%" : 0, display: "flex", background: steerBg, borderRadius: 7, border: `1px solid ${steerBorder}`, padding: "0 10px", order: isPhoneUI ? 3 : 0 }}>
               <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") sendMessage(); }}
                 placeholder={placeholder}
                 style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: !hasTarget ? "#c19a92" : isResearching ? "#5ce0d8" : "#a0a0b8", padding: "9px 0", fontSize: 12.5, fontFamily: "inherit" }}
               />
             </div>
-            {!hasTarget && <span style={{ color: "#7d5f5a", fontSize: 10.5, flexShrink: 0 }}>Click a snake head to target it</span>}
-            {hasTarget && !targetHasKey && <span style={{ color: "#8f845b", fontSize: 10.5, flexShrink: 0 }}>Open Agent Config and paste your personal key</span>}
+            {!hasTarget && !isPhoneUI && <span style={{ color: "#7d5f5a", fontSize: 10.5, flexShrink: 0 }}>Click a snake head to target it</span>}
+            {hasTarget && !targetHasKey && !isPhoneUI && <span style={{ color: "#8f845b", fontSize: 10.5, flexShrink: 0 }}>Open Agent Config and paste your personal key</span>}
             <button onClick={() => { if (hasTarget && !targetHasKey) { setConfigOpen(selectedSnake.id); return; } sendMessage(); }} disabled={sendDisabled} style={{
               background: !sendDisabled ? (!targetHasKey ? "#ddcc55" : isResearching ? "#5ce0d8" : "#22d65b") : "#10102a",
               color: !sendDisabled ? "#050510" : "#333",
